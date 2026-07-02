@@ -76,10 +76,12 @@ async def generate_with_krea(prompt: str, aspect_ratio: str = "1:1") -> str | No
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(VERCEL_KREA, json={
             "prompt": prompt,
-            "aspect_ratio": aspect_ratio,
+            "kreaKey": KREA_KEY,
+            "aspectRatio": aspect_ratio,
             "resolution": "1K",
-        }, headers={"x-krea-key": KREA_KEY})
+        })
         data = r.json()
+        print(f"Krea response: {data}")
         return data.get("imageUrl")
 
 
