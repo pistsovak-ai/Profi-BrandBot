@@ -445,7 +445,7 @@ def main():
             CommandHandler("start", start),
             MessageHandler(filters.TEXT & ~filters.COMMAND, fallback),
         ],
-        per_message=False,
+        per_message=True,
         allow_reentry=True,
     )
 
@@ -453,7 +453,7 @@ def main():
     app.add_handler(MessageHandler(filters.ALL, fallback))
 
     print("Bot started")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
