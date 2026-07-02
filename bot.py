@@ -284,9 +284,18 @@ async def topic_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mode  = ctx.user_data.get("mode", "illustration")
     ctx.user_data["last_topic"] = topic
 
-    msg = await update.message.reply_text("Генерирую... обычно 20–40 секунд")
-    await _generate_image(msg, ctx, mode, topic, edit=True)
-    return ConversationHandler.END
+    if mode == "illustration":
+        await update.message.reply_text(
+            "*Иллюстрация · Шаг 2 из 4*\n\nТип иллюстрации:",
+            parse_mode="Markdown", reply_markup=il_type_keyboard()
+        )
+        return WAITING_IL_TYPE
+    else:
+        await update.message.reply_text(
+            "*Фото · Шаг 2 из 5*\n\nТип сцены:",
+            parse_mode="Markdown", reply_markup=ph_type_keyboard()
+        )
+        return WAITING_PH_TYPE
 
 
 async def _generate_image(msg, ctx, mode: str, topic: str, edit: bool, is_prompt: bool = False):
