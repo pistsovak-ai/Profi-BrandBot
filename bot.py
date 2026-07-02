@@ -133,14 +133,17 @@ def build_illustration_prompt(topic, il_type, deco, ratio):
 
     return (
         f"{topic}, {type_str}, "
-        f"flat 3D illustration, pseudo-3D, parallel orthographic camera, "
-        f"smooth rounded shapes, soft edges, no outlines, "
-        f"light periwinkle blue #A9BAFD to #E6EBFF gradient body, "
+        f"2D flat vector illustration, strictly frontal view, zero perspective, "
+        f"no 3D depth, no foreshortening, no isometric angle, "
+        f"smooth rounded shapes, soft edges, no outlines no strokes, "
+        f"light periwinkle blue #A9BAFD to #E6EBFF flat gradient fill, "
         f"single red accent #FA2A48 on one small detail only, "
-        f"pure white background, subtle grain noise texture, "
-        f"very soft diffuse light, no hard shadows, no drop shadow, "
+        f"pure white background, "
+        f"heavy film grain noise texture overlay all over the image, "
+        f"no shadows, no drop shadow, no cast shadow, no ambient occlusion, "
         f"{no_deco}"
-        f"NOT photorealistic, NOT glossy, NOT metallic"
+        f"NOT 3D render, NOT isometric, NOT perspective view, "
+        f"NOT photorealistic, NOT glossy, NOT metallic, NOT shiny"
     )
 
 def build_photo_prompt(topic, ph_type, loc, mood):
