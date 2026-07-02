@@ -1,139 +1,32 @@
 import os
 import json
-import time
 import base64
 import asyncio
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, ConversationHandler
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# ── CONFIG ──
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY", "")
 KREA_KEY       = os.environ.get("KREA_KEY", "")
-KREA_API_URL   = "https://api.krea.ai/v1"
 VERCEL_KREA    = "https://profi-brand-generator.vercel.app/api/krea"
 
-# Conversation states
-WAITING_TOPIC      = 1
-WAITING_IL_TYPE    = 2
-WAITING_IL_DECO    = 3
-WAITING_IL_RATIO   = 4
-WAITING_PH_TYPE    = 5
-WAITING_PH_LOC     = 6
-WAITING_PH_MOOD    = 7
-WAITING_PH_RATIO   = 8
-WAITING_IMAGE_BC   = 9
+BRANDBOOK_SYSTEM = """You are a Profi.ru brand expert. Analyze layouts strictly by the brandbook.
 
-# ── BRAND TOKENS ──
-BRAND_TOKENS = {
-    "illustration": {
-        "style": "flat 3D illustration, parallel camera, no realistic perspective",
-        "colors": "primary blue #E6EBFF to #A9BAFD gradient, red accent #FA2A48, white background",
-        "geometry": "rounded shapes, smooth curves, no outlines",
-        "texture": "subtle grain noise",
-        "lighting": "stylized top-left light, no real shadows",
-    },
-    "photo": {
-        "style": "Human Lifestyle documentary photography",
-        "lighting": "natural daylight, low contrast, slightly cool temperature",
-        "colors": "muted saturation, #E6EBFF atmosphere, #FA2A48 accent 5-15% of frame",
-        "mood": "candid, warm, real moments not staged",
-        "people": "real people, authentic emotions, comfort over status",
-    }
-}
+PROFI.RU BRANDBOOK:
+Colors: red #FA2A48 (main accent), blue #E6EBFF / #A9BAFD (backgrounds), white, black
+Illustrations: flat 3D, parallel camera, rounded shapes, red accent, blue palette, no realistic perspective
+Photo (Human Lifestyle): natural light, muted saturation, candid scenes, people over objects
+Logo: safe zone = 3 circles of the sign, red or white depending on background
+Typography: one sans-serif, clear hierarchy, no decorative fonts
+Composition: clean and airy, one visual center, not cluttered
 
-BRANDBOOK_SYSTEM = """Ты — эксперт по брендингу Профи.ру. Анализируй макеты строго по брендбуку.
+Reply STRICTLY in JSON without markdown:
+{"score": <0-100>, "verdict": "<one phrase>", "items": [{"category": "<name>", "status": "<ok|warn|fail>", "comment": "<text>"}]}"""
 
-БРЕНДБУК ПРОФИ.РУ:
-Цвета: красный #FA2A48 (основной акцент), синие #E6EBFF / #A9BAFD (фон и элементы), белый, чёрный
-Иллюстрации: плоский 3D, параллельная камера, округлые формы, красный акцент, синяя палитра, без реалистичной перспективы
-Фото (Human Lifestyle): натуральный свет, приглушённая насыщенность, живые сцены, люди важнее предметов
-Логотип: охранное поле = 3 окружности знака, красный или белый логотип в зависимости от фона
-Типографика: один гротеск, чёткая иерархия, без декоративных шрифтов
-Композиция: чистота и воздух, один визуальный центр, нет перегруженности
+# ── STATE MACHINE ──
+# state: None | "il_type" | "il_deco" | "il_ratio" | "ph_type" | "ph_loc" | "ph_mood" | "ph_ratio" | "bc_wait"
 
-Отвечай СТРОГО в JSON без markdown:
-{"score": <0-100>, "verdict": "<одна фраза>", "items": [{"category": "<название>", "status": "<ok|warn|fail>", "comment": "<текст>"}]}"""
-
-
-def build_illustration_prompt(topic: str, il_type: str = "single object", deco: str = "no decorative elements") -> str:
-    deco_part = f"{deco}, " if deco != "no decorative elements" else "NO decorative elements, NO extra shapes, "
-    return (
-        f"{topic}, {il_type}, "
-        f"flat 3D illustration, pseudo-3D, parallel orthographic camera, "
-        f"smooth rounded shapes, soft edges, no outlines, "
-        f"color: light periwinkle blue #A9BAFD to #E6EBFF gradient body, "
-        f"single red accent #FA2A48 on one small detail only, "
-        f"pure white background, "
-        f"subtle grain noise texture, "
-        f"very soft diffuse light no hard shadows no drop shadow, "
-        f"{deco_part}"
-        f"NO ground shadow, NO cast shadow, NO reflection, "
-        f"NOT photorealistic, NOT glossy, NOT metallic, NOT shiny"
-    )
-
-def build_photo_prompt(topic: str, ph_type: str = "specialist at work", loc: str = "home interior", mood: str = "warm and comfortable") -> str:
-    return (
-        f"{topic}, {ph_type}, {loc}, mood: {mood}, "
-        f"candid lifestyle documentary photography, "
-        f"natural soft daylight, slightly cool color temperature, "
-        f"low contrast, muted desaturated colors, "
-        f"light blue #E6EBFF tones in atmosphere, "
-        f"small red accent detail in frame, "
-        f"real authentic moment not staged, "
-        f"warm human connection, everyday life, "
-        f"shot on mirrorless camera, f/2.8, "
-        f"NOT stock photo, NOT posed, NOT studio lighting"
-    )
-
-
-async def generate_with_krea(prompt: str, aspect_ratio: str = "1:1") -> str | None:
-    """Generate image via Vercel proxy → Krea API, returns image URL."""
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(VERCEL_KREA, json={
-            "prompt": prompt,
-            "kreaKey": KREA_KEY,
-            "aspectRatio": aspect_ratio,
-            "resolution": "1K",
-        })
-        data = r.json()
-        print(f"Krea response: {data}")
-        return data.get("imageUrl")
-
-
-async def analyze_with_claude(image_b64: str, checks: list[str]) -> dict:
-    """Send image to Claude for brand check, returns parsed JSON."""
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-opus-4-5",
-                "max_tokens": 1500,
-                "system": BRANDBOOK_SYSTEM,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                        {"type": "text", "text": f"Проверь макет. Параметры: {', '.join(checks)}. Верни только JSON."}
-                    ]
-                }]
-            }
-        )
-        raw = r.json()["content"][0]["text"].strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw)
-
-
-# ── KEYBOARDS ──
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Иллюстрация", callback_data="mode_illustration"),
@@ -141,14 +34,11 @@ def main_menu_keyboard():
         [InlineKeyboardButton("Бренд-чек макета", callback_data="mode_brandcheck")],
     ])
 
-def cancel_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="cancel")]])
-
 def il_type_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Один объект", callback_data="il_type_single"),
          InlineKeyboardButton("Сюжетная сцена", callback_data="il_type_scene")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
 def il_deco_keyboard():
@@ -158,7 +48,7 @@ def il_deco_keyboard():
         [InlineKeyboardButton("Orbit lines", callback_data="il_deco_orbit"),
          InlineKeyboardButton("Coins", callback_data="il_deco_coins")],
         [InlineKeyboardButton("Ничего", callback_data="il_deco_none")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
 def il_ratio_keyboard():
@@ -167,7 +57,7 @@ def il_ratio_keyboard():
          InlineKeyboardButton("4:5", callback_data="ratio_4:5"),
          InlineKeyboardButton("9:16", callback_data="ratio_9:16"),
          InlineKeyboardButton("16:9", callback_data="ratio_16:9")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
 def ph_type_keyboard():
@@ -176,7 +66,7 @@ def ph_type_keyboard():
         [InlineKeyboardButton("Специалист + клиент", callback_data="ph_type_together")],
         [InlineKeyboardButton("Результат / до-после", callback_data="ph_type_result"),
          InlineKeyboardButton("Домашний момент", callback_data="ph_type_home")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
 def ph_loc_keyboard():
@@ -189,7 +79,7 @@ def ph_loc_keyboard():
          InlineKeyboardButton("Ванная", callback_data="ph_loc_bath")],
         [InlineKeyboardButton("Дача", callback_data="ph_loc_dacha"),
          InlineKeyboardButton("Гостиная", callback_data="ph_loc_living")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
 def ph_mood_keyboard():
@@ -200,7 +90,7 @@ def ph_mood_keyboard():
         [InlineKeyboardButton("Уверенность", callback_data="ph_mood_confidence"),
          InlineKeyboardButton("Уют", callback_data="ph_mood_cozy"),
          InlineKeyboardButton("Веселье", callback_data="ph_mood_fun")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
 def ph_ratio_keyboard():
@@ -209,157 +99,284 @@ def ph_ratio_keyboard():
          InlineKeyboardButton("4:5", callback_data="ratio_4:5"),
          InlineKeyboardButton("16:9", callback_data="ratio_16:9"),
          InlineKeyboardButton("3:2", callback_data="ratio_3:2")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("Назад", callback_data="cancel")],
     ])
 
+def result_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ещё вариант", callback_data="again"),
+         InlineKeyboardButton("В меню", callback_data="menu")],
+    ])
+
+def bc_result_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Проверить другой", callback_data="mode_brandcheck"),
+         InlineKeyboardButton("В меню", callback_data="menu")],
+    ])
+
+# ── PROMPT BUILDERS ──
+def build_illustration_prompt(topic, il_type, deco, ratio):
+    deco_map = {
+        "il_deco_sparkles": "small sparkle stars around object",
+        "il_deco_clouds":   "soft cloud shapes in background",
+        "il_deco_orbit":    "orbit lines circles around object",
+        "il_deco_coins":    "small coin elements scattered",
+        "il_deco_none":     "",
+    }
+    type_map = {
+        "il_type_single": "single object centered, minimalist",
+        "il_type_scene":  "narrative scene with 2-3 objects",
+    }
+    deco_str = deco_map.get(deco, "")
+    type_str = type_map.get(il_type, "single object centered")
+    no_deco  = "NO decorative elements, NO extra shapes, " if not deco_str else f"{deco_str}, "
+
+    return (
+        f"{topic}, {type_str}, "
+        f"flat 3D illustration, pseudo-3D, parallel orthographic camera, "
+        f"smooth rounded shapes, soft edges, no outlines, "
+        f"light periwinkle blue #A9BAFD to #E6EBFF gradient body, "
+        f"single red accent #FA2A48 on one small detail only, "
+        f"pure white background, subtle grain noise texture, "
+        f"very soft diffuse light, no hard shadows, no drop shadow, "
+        f"{no_deco}"
+        f"NOT photorealistic, NOT glossy, NOT metallic"
+    )
+
+def build_photo_prompt(topic, ph_type, loc, mood):
+    type_map = {
+        "ph_type_specialist": "professional specialist at work focused and skilled",
+        "ph_type_together":   "specialist and client together warm interaction",
+        "ph_type_result":     "before and after result transformation moment",
+        "ph_type_home":       "casual home moment everyday life",
+    }
+    loc_map = {
+        "ph_loc_home":    "apartment interior home environment",
+        "ph_loc_kitchen": "kitchen cooking area",
+        "ph_loc_work":    "workspace desk office",
+        "ph_loc_kids":    "children room study area",
+        "ph_loc_outdoor": "yard park outdoor",
+        "ph_loc_bath":    "bathroom",
+        "ph_loc_dacha":   "dacha country house garden",
+        "ph_loc_living":  "living room cozy interior",
+    }
+    mood_map = {
+        "ph_mood_trust":      "trust reliability",
+        "ph_mood_comfort":    "comfort ease relaxed",
+        "ph_mood_calm":       "calm peaceful serene",
+        "ph_mood_confidence": "confidence professional pride",
+        "ph_mood_cozy":       "cozy warm homey",
+        "ph_mood_fun":        "fun joyful lighthearted",
+    }
+    return (
+        f"{topic}, {type_map.get(ph_type,'specialist at work')}, "
+        f"{loc_map.get(loc,'home interior')}, mood: {mood_map.get(mood,'warm comfortable')}, "
+        f"candid lifestyle documentary photography, "
+        f"natural soft daylight slightly cool temperature, "
+        f"low contrast muted desaturated colors, "
+        f"light blue #E6EBFF tones in atmosphere, "
+        f"real authentic moment not staged, warm human connection, "
+        f"shot on mirrorless camera f/2.8, "
+        f"NOT stock photo, NOT posed, NOT studio lighting"
+    )
+
+# ── KREA + CLAUDE ──
+async def generate_with_krea(prompt, aspect_ratio="1:1"):
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(VERCEL_KREA, json={
+            "prompt": prompt,
+            "kreaKey": KREA_KEY,
+            "aspectRatio": aspect_ratio,
+            "resolution": "1K",
+        })
+        data = r.json()
+        return data.get("imageUrl")
+
+async def analyze_with_claude(image_b64, checks):
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={
+                "model": "claude-opus-4-5",
+                "max_tokens": 1500,
+                "system": BRANDBOOK_SYSTEM,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                    {"type": "text", "text": f"Check this layout. Parameters: {', '.join(checks)}. Return only JSON."}
+                ]}]
+            }
+        )
+        raw = r.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
+        return json.loads(raw)
 
 # ── HANDLERS ──
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
     await update.message.reply_text(
-        "Привет! Я *Profi Brand Generator* — генерирую фирменную графику Профи.ру по токенам брендбука.\n\n"
-        "Выбери что хочешь сделать:",
+        "Привет! Я *Profi Brand Generator* — генерирую фирменную графику Профи.ру по токенам брендбука.\n\nВыбери что хочешь сделать:",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
     )
-    return ConversationHandler.END
 
+async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = q.data
+    ud = ctx.user_data
 
-async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+    # ── MENU ──
+    if d == "menu":
+        ud.clear()
+        await q.edit_message_text("Что делаем дальше?", reply_markup=main_menu_keyboard())
+        return
 
-    if data == "cancel":
-        await query.edit_message_text("Окей, отменила 👌\n\nЧто делаем дальше?", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
+    if d == "cancel":
+        ud.clear()
+        await q.edit_message_text("Отменено. Что делаем дальше?", reply_markup=main_menu_keyboard())
+        return
 
-    if data == "mode_illustration":
-        ctx.user_data["mode"] = "illustration"
-        await query.edit_message_text(
-            "*Иллюстрация в стиле Профи.ру*\n\n"
-            "Опиши что должно быть на картинке — тему, объект или сцену.\n\n"
-            "_Например: будильник, свинья-копилка, ремонт квартиры, психолог_",
+    # ── START ILLUSTRATION ──
+    if d == "mode_illustration":
+        ud["mode"] = "illustration"
+        ud["state"] = "il_topic"
+        await q.edit_message_text(
+            "*Иллюстрация · Шаг 1 из 4*\n\nОпиши тему или объект:\n\n_Например: будильник, свинья-копилка, психолог_",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="cancel")]]))
+        return
+
+    # ── START PHOTO ──
+    if d == "mode_photo":
+        ud["mode"] = "photo"
+        ud["state"] = "ph_topic"
+        await q.edit_message_text(
+            "*Фото · Шаг 1 из 5*\n\nОпиши сцену — что происходит:\n\n_Например: репетитор объясняет ребёнку математику_",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="cancel")]]))
+        return
+
+    # ── START BRANDCHECK ──
+    if d == "mode_brandcheck":
+        ud["mode"] = "brandcheck"
+        ud["state"] = "bc_wait"
+        await q.edit_message_text(
+            "*Бренд-чек макета*\n\nПришли скрин баннера, иллюстрации или поста — проверю на соответствие брендбуку Профи.ру.",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="cancel")]]))
+        return
+
+    # ── ILLUSTRATION STEPS ──
+    if d in ("il_type_single", "il_type_scene"):
+        ud["il_type"] = d
+        ud["state"] = "il_deco"
+        await q.edit_message_text("*Иллюстрация · Шаг 3 из 4*\n\nДекоративные элементы:", parse_mode="Markdown", reply_markup=il_deco_keyboard())
+        return
+
+    if d.startswith("il_deco_"):
+        ud["il_deco"] = d
+        ud["state"] = "il_ratio"
+        await q.edit_message_text("*Иллюстрация · Шаг 4 из 4*\n\nСоотношение сторон:", parse_mode="Markdown", reply_markup=il_ratio_keyboard())
+        return
+
+    # ── PHOTO STEPS ──
+    if d.startswith("ph_type_"):
+        ud["ph_type"] = d
+        ud["state"] = "ph_loc"
+        await q.edit_message_text("*Фото · Шаг 3 из 5*\n\nЛокация:", parse_mode="Markdown", reply_markup=ph_loc_keyboard())
+        return
+
+    if d.startswith("ph_loc_"):
+        ud["ph_loc"] = d
+        ud["state"] = "ph_mood"
+        await q.edit_message_text("*Фото · Шаг 4 из 5*\n\nНастроение:", parse_mode="Markdown", reply_markup=ph_mood_keyboard())
+        return
+
+    if d.startswith("ph_mood_"):
+        ud["ph_mood"] = d
+        ud["state"] = "ph_ratio"
+        await q.edit_message_text("*Фото · Шаг 5 из 5*\n\nСоотношение сторон:", parse_mode="Markdown", reply_markup=ph_ratio_keyboard())
+        return
+
+    # ── RATIO → GENERATE ──
+    if d.startswith("ratio_"):
+        ud["ratio"] = d.replace("ratio_", "")
+        mode = ud.get("mode", "illustration")
+        topic = ud.get("topic", "")
+        ratio = ud.get("ratio", "1:1")
+
+        if mode == "illustration":
+            prompt = build_illustration_prompt(topic, ud.get("il_type","il_type_single"), ud.get("il_deco","il_deco_none"), ratio)
+        else:
+            prompt = build_photo_prompt(topic, ud.get("ph_type","ph_type_specialist"), ud.get("ph_loc","ph_loc_home"), ud.get("ph_mood","ph_mood_comfort"))
+
+        ud["last_prompt"] = prompt
+        ud["state"] = "done"
+        msg = await q.edit_message_text("Генерирую... обычно 20–40 секунд")
+        await _do_generate(q.message.chat_id, msg, prompt, ratio, mode, ctx)
+        return
+
+    # ── AGAIN ──
+    if d == "again":
+        prompt = ud.get("last_prompt", "")
+        ratio  = ud.get("ratio", "1:1")
+        mode   = ud.get("mode", "illustration")
+        if prompt:
+            msg = await q.edit_message_text("Генерирую ещё вариант...")
+            await _do_generate(q.message.chat_id, msg, prompt, ratio, mode, ctx)
+        return
+
+async def _do_generate(chat_id, msg, prompt, ratio, mode, ctx):
+    try:
+        url = await generate_with_krea(prompt, ratio)
+        if not url:
+            raise ValueError("Krea не вернула изображение")
+        label = "Иллюстрация" if mode == "illustration" else "Фото"
+        topic = ctx.user_data.get("topic", "")
+        await msg.delete()
+        await ctx.bot.send_photo(
+            chat_id=chat_id,
+            photo=url,
+            caption=f"{label} · Nano Banana 2\n\n_{topic}_",
             parse_mode="Markdown",
-            reply_markup=cancel_keyboard()
+            reply_markup=result_keyboard()
         )
-        return WAITING_TOPIC
+    except Exception as e:
+        await msg.edit_text(f"Ошибка генерации: {e}", reply_markup=main_menu_keyboard())
 
-    if data == "mode_photo":
-        ctx.user_data["mode"] = "photo"
-        await query.edit_message_text(
-            "*Фото в стиле Human Lifestyle*\n\n"
-            "Опиши сцену или тему.\n\n"
-            "_Например: репетитор с учеником, уборка дома, курьер у двери_",
-            parse_mode="Markdown",
-            reply_markup=cancel_keyboard()
-        )
-        return WAITING_TOPIC
+async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ud = ctx.user_data
+    state = ud.get("state")
+    text = update.message.text.strip()
 
-    if data == "mode_brandcheck":
-        ctx.user_data["mode"] = "brandcheck"
-        await query.edit_message_text(
-            "*Бренд-чек макета*\n\n"
-            "Пришли скрин или фото макета — баннера, иллюстрации, поста.\n"
-            "Я проверю его на соответствие брендбуку Профи.ру и дам оценку.",
-            parse_mode="Markdown",
-            reply_markup=cancel_keyboard()
-        )
-        return WAITING_IMAGE_BC
-
-    if data == "again":
-        mode = ctx.user_data.get("mode", "illustration")
-        topic = ctx.user_data.get("last_topic", "")
-        if topic:
-            await query.edit_message_text(f"Генерирую ещё вариант... ⏳")
-            await _generate_image(query.message, ctx, mode, topic, edit=False)
-        return ConversationHandler.END
-
-    if data == "menu":
-        await query.edit_message_text("Что делаем дальше?", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-
-async def topic_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    topic = update.message.text.strip()
-    mode  = ctx.user_data.get("mode", "illustration")
-    ctx.user_data["last_topic"] = topic
-
-    if mode == "illustration":
+    if state == "il_topic":
+        ud["topic"] = text
+        ud["state"] = "il_type"
         await update.message.reply_text(
             "*Иллюстрация · Шаг 2 из 4*\n\nТип иллюстрации:",
-            parse_mode="Markdown", reply_markup=il_type_keyboard()
-        )
-        return WAITING_IL_TYPE
-    else:
+            parse_mode="Markdown", reply_markup=il_type_keyboard())
+        return
+
+    if state == "ph_topic":
+        ud["topic"] = text
+        ud["state"] = "ph_type"
         await update.message.reply_text(
             "*Фото · Шаг 2 из 5*\n\nТип сцены:",
-            parse_mode="Markdown", reply_markup=ph_type_keyboard()
-        )
-        return WAITING_PH_TYPE
+            parse_mode="Markdown", reply_markup=ph_type_keyboard())
+        return
 
+    # default
+    await update.message.reply_text("Используй кнопки меню или напиши /start", reply_markup=main_menu_keyboard())
 
-async def _generate_image(msg, ctx, mode: str, topic: str, edit: bool, is_prompt: bool = False):
-    if is_prompt:
-        prompt = topic  # already built
-    elif mode == "illustration":
-        prompt = build_illustration_prompt(topic)
-    else:
-        prompt = build_photo_prompt(topic)
-    label = "Иллюстрация" if mode == "illustration" else "Фото"
-
-    try:
-        image_url = await generate_with_krea(prompt)
-        if not image_url:
-            raise ValueError("Krea не вернула изображение")
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Ещё вариант", callback_data="again"),
-             InlineKeyboardButton("В меню", callback_data="menu")]
-        ])
-
-        caption = f"{label} · Nano Banana 2\n\n_{topic}_"
-        if edit:
-            await msg.delete()
-
-        await msg.reply_photo(
-            photo=image_url,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        ) if not edit else await msg.get_bot().send_photo(
-            chat_id=msg.chat_id,
-            photo=image_url,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-
-    except Exception as e:
-        text = f"Ошибка генерации: {e}\n\nПопробуй ещё раз."
-        if edit:
-            await msg.edit_text(text, reply_markup=main_menu_keyboard())
-        else:
-            await msg.reply_text(text, reply_markup=main_menu_keyboard())
-
-
-async def image_received_for_brandcheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo
-    doc   = update.message.document
-
-    if not photo and not doc:
-        await update.message.reply_text("Пришли изображение (фото или файл PNG/JPG)")
-        return WAITING_IMAGE_BC
+async def photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ud = ctx.user_data
+    if ud.get("state") != "bc_wait":
+        await update.message.reply_text("Сначала выбери режим Бренд-чек в меню.", reply_markup=main_menu_keyboard())
+        return
 
     msg = await update.message.reply_text("Анализирую макет по брендбуку...")
-
     try:
-        if photo:
-            file = await photo[-1].get_file()
-        else:
-            file = await doc.get_file()
-
-        file_bytes = await file.download_as_bytearray()
-        image_b64  = base64.b64encode(file_bytes).decode()
+        photo = update.message.photo
+        doc   = update.message.document
+        file  = await (photo[-1] if photo else doc).get_file()
+        image_b64 = base64.b64encode(await file.download_as_bytearray()).decode()
 
         checks = ["Цвета", "Типографика", "Стиль иллюстрации", "Логотип", "Композиция"]
         result = await analyze_with_claude(image_b64, checks)
@@ -367,94 +384,27 @@ async def image_received_for_brandcheck(update: Update, ctx: ContextTypes.DEFAUL
         score   = result.get("score", 0)
         verdict = result.get("verdict", "Проверка завершена")
         items   = result.get("items", [])
+        score_mark = "+" if score >= 75 else "~" if score >= 50 else "-"
+        icons = {"ok": "+", "warn": "!", "fail": "-"}
 
-        score_emoji = "●" if score >= 75 else "○" if score >= 50 else "×"
-        status_icon = {"ok": "+", "warn": "!", "fail": "−"}
-
-        lines = [
-            f"{score_emoji} *Соответствие бренду: {score}/100*",
-            f"_{verdict}_\n",
-        ]
+        lines = [f"[{score_mark}] *Соответствие бренду: {score}/100*", f"_{verdict}_\n"]
         for item in items:
-            icon = status_icon.get(item.get("status", ""), "•")
-            lines.append(f"{icon} *{item['category']}*")
+            lines.append(f"[{icons.get(item.get('status',''),'?')}] *{item['category']}*")
             lines.append(f"    {item['comment']}\n")
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Проверить другой", callback_data="mode_brandcheck"),
-             InlineKeyboardButton("В меню", callback_data="menu")]
-        ])
-
-        await msg.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
-
+        await msg.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=bc_result_keyboard())
+        ud["state"] = "done"
     except Exception as e:
         await msg.edit_text(f"Ошибка анализа: {e}", reply_markup=main_menu_keyboard())
 
-    return ConversationHandler.END
-
-
-async def fallback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Используй кнопки меню или напиши /start",
-        reply_markup=main_menu_keyboard()
-    )
-    return ConversationHandler.END
-
-
-# ── MAIN ──
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CallbackQueryHandler(button_handler),
-        ],
-        states={
-            WAITING_TOPIC: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, topic_received),
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_IL_TYPE: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_IL_DECO: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_IL_RATIO: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_PH_TYPE: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_PH_LOC: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_PH_MOOD: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_PH_RATIO: [
-                CallbackQueryHandler(button_handler),
-            ],
-            WAITING_IMAGE_BC: [
-                MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_received_for_brandcheck),
-                CallbackQueryHandler(button_handler),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("start", start),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, fallback),
-        ],
-        per_message=True,
-        allow_reentry=True,
-    )
-
-    app.add_handler(conv)
-    app.add_handler(MessageHandler(filters.ALL, fallback))
-
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, photo_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     print("Bot started")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
