@@ -407,6 +407,7 @@ def main():
 
     conv = ConversationHandler(
         entry_points=[
+            CommandHandler("start", start),
             CallbackQueryHandler(button_handler, pattern="^mode_"),
         ],
         states={
@@ -415,45 +416,41 @@ def main():
                 CallbackQueryHandler(button_handler, pattern="^cancel$"),
             ],
             WAITING_IL_TYPE: [
-                CallbackQueryHandler(button_handler, pattern="^il_type_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(il_type_|cancel)"),
             ],
             WAITING_IL_DECO: [
-                CallbackQueryHandler(button_handler, pattern="^il_deco_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(il_deco_|cancel)"),
             ],
             WAITING_IL_RATIO: [
-                CallbackQueryHandler(button_handler, pattern="^ratio_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(ratio_|cancel)"),
             ],
             WAITING_PH_TYPE: [
-                CallbackQueryHandler(button_handler, pattern="^ph_type_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(ph_type_|cancel)"),
             ],
             WAITING_PH_LOC: [
-                CallbackQueryHandler(button_handler, pattern="^ph_loc_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(ph_loc_|cancel)"),
             ],
             WAITING_PH_MOOD: [
-                CallbackQueryHandler(button_handler, pattern="^ph_mood_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(ph_mood_|cancel)"),
             ],
             WAITING_PH_RATIO: [
-                CallbackQueryHandler(button_handler, pattern="^ratio_"),
-                CallbackQueryHandler(button_handler, pattern="^cancel$"),
+                CallbackQueryHandler(button_handler, pattern="^(ratio_|cancel)"),
             ],
             WAITING_IMAGE_BC: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_received_for_brandcheck),
                 CallbackQueryHandler(button_handler, pattern="^cancel$"),
             ],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("start", start),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, fallback),
+        ],
         per_message=False,
+        allow_reentry=True,
     )
 
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(menu|again)$"))
     app.add_handler(MessageHandler(filters.ALL, fallback))
 
     print("Bot started")
