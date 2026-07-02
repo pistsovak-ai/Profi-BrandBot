@@ -54,20 +54,32 @@ BRANDBOOK_SYSTEM = """Ты — эксперт по брендингу Профи
 
 
 def build_illustration_prompt(topic: str) -> str:
-    t = BRAND_TOKENS["illustration"]
     return (
-        f"{topic}, {t['style']}, {t['colors']}, "
-        f"{t['geometry']}, {t['texture']}, {t['lighting']}, "
-        f"transparent background, clean composition, minimal objects, "
-        f"Profi.ru brand style"
+        f"{topic}, "
+        f"flat 3D illustration style, pseudo-3D, parallel camera orthographic projection, "
+        f"no realistic perspective, no photorealism, "
+        f"smooth rounded shapes, soft edges, no outlines no strokes, "
+        f"color palette: light blue #E6EBFF to periwinkle #A9BAFD gradient fill, "
+        f"red accent #FA2A48 on key detail only, white clean background, "
+        f"subtle grain noise texture on dark areas, "
+        f"stylized soft light from top-left, no hard shadows, "
+        f"minimalist composition 1-2 objects centered, "
+        f"vector illustration aesthetic, brand mascot style, "
+        f"NOT realistic, NOT 3D render, NOT glossy, NOT metallic"
     )
 
 def build_photo_prompt(topic: str) -> str:
-    t = BRAND_TOKENS["photo"]
     return (
-        f"{topic}, {t['style']}, {t['lighting']}, "
-        f"{t['colors']}, {t['mood']}, {t['people']}, "
-        f"professional quality"
+        f"{topic}, "
+        f"candid lifestyle documentary photography, "
+        f"natural soft daylight, slightly cool color temperature, "
+        f"low contrast, muted desaturated colors, "
+        f"light blue #E6EBFF tones in atmosphere, "
+        f"small red accent detail in frame, "
+        f"real authentic moment not staged, "
+        f"warm human connection, everyday life, "
+        f"shot on mirrorless camera, f/2.8, "
+        f"NOT stock photo, NOT posed, NOT studio lighting"
     )
 
 
